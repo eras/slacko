@@ -169,6 +169,10 @@ type bot_error = [
   | `User_is_bot
 ]
 
+type rtm_start_error = [
+  | `Migration_in_progress
+]
+
 type parsed_auth_error = [
   | parsed_api_error
   | auth_error
@@ -591,6 +595,55 @@ type history_result = [
   | timestamp_error
 ]
 
+type self_obj = {
+  id : string;
+  name : string;
+} [@@deriving of_yojson { strict = false }]
+
+type rtm_start_obj = {
+  self: self_obj;
+  team: team_obj;
+  latest_event_ts: timestamp;
+  (* channels: channel list; *)
+  groups: group list;
+  (* ims: im_obj list; *)
+  cache_ts: timestamp;
+  (* users: user list; *)
+  url: string;
+} [@@deriving of_yojson { strict = false }]
+
+type rtm_message =
+  { channel : channel;
+    user : user;
+    text : string;
+    ts : timestamp;
+    team : string } [@@deriving of_yojson { strict = false }]
+
+type rtm_ping =
+  {
+    id : int;
+    type_ : string [@key "type"];
+  } [@@deriving to_yojson, of_yojson { strict = false }]
+
+type rtm_event =
+  | RtmConnected
+  | RtmDisconnected
+  | RtmMessage of rtm_message
+  | RtmException of exn
+
+type ('unit, 'event) rtm_base =
+  {
+    (* Source for received messages from the connection *)
+    rtm_receive : ('unit -> 'event Lwt.t);
+
+    (* Way to signal that the connection is to be stopped *)
+    rtm_stop : (unit -> unit Lwt.t);
+  }
+
+type rtm_session = (unit, rtm_event) rtm_base
+
+type rtm_source = (rtm_event, unit) rtm_base
+
 let base_url = "https://slack.com/api/"
 
 let endpoint e =
@@ -666,6 +719,7 @@ let validate json =
     | _, Some "not_authed" -> `Not_authed
     | _, Some "not_authorized" -> `Not_authorized
     | _, Some "not_in_channel" -> `Not_in_channel
+    | _, Some "migration_in_progress" -> `Migration_in_progress
     | _, Some "paid_only" -> `Paid_only
     | _, Some "rate_limited" -> `Rate_limited
     | _, Some "restricted_action" -> `Restricted_action
@@ -1702,3 +1756,128 @@ let users_set_presence token presence =
     | #parsed_auth_error
     | #presence_error as res -> res
     | _ -> `Unknown_error
+
+let rtm_event_source (recv, send) (rtms : rtm_source) =
+  let send_id = ref 1 in
+  let time = Mtime.counter () in
+  let last_communication = ref 0.0 in
+  let now () = Mtime.count time |> Mtime.to_s in
+  let reset_timeout () = last_communication := now () in
+  let rec loop () =
+    Lwt.catch
+      ( fun () ->
+          Lwt.pick [
+            (recv () >>= fun x -> Lwt.return (`Frame x));
+            (Lwt_unix.sleep 5.0 >>= fun x -> Lwt.return `Timeout);
+            (rtms.rtm_stop () >>= fun () -> Lwt.return `Stop);
+          ] )
+      ( function
+        | Failure _ (* "EOF" *) -> (* pattern matching on Failure is fragile, doesn't Conduit provide a better way? *)
+          Lwt.return `Eof
+        | exn ->
+          Lwt.return (`Exception exn) )
+    >>= function
+    | `Frame (frame : Websocket_lwt.Frame.t) ->
+      reset_timeout ();
+      let content = frame.Websocket_lwt.Frame.content in
+      ( match frame.Websocket_lwt.Frame.opcode with
+        | Websocket_lwt.Frame.Opcode.Text ->
+          let event =
+            if String.length content > 0 && content.[0] = '{' then
+              let json = Yojson.Safe.from_string content in
+              match rtm_message_of_yojson json with
+              | Result.Ok str -> Some (RtmMessage str)
+              | Result.Error x -> None
+            else
+              None
+          in
+          let%lwt () =
+            match event with
+            | Some event -> rtms.rtm_receive event
+            | None -> Lwt.return ()
+          in
+          (* Printf.printf "%s, %d, %b, %s\n%!" opcode_str frame.extension frame.final frame.content; *)
+          (* Printf.printf "%s\n%!" (CCOpt.map (fun x -> x.text) event |> CCOpt.get "-"); *)
+          Lwt.return ()
+        | Websocket_lwt.Frame.Opcode.Close ->
+          Lwt.return ()
+        | Websocket_lwt.Frame.Opcode.Ping ->
+          send { Websocket_lwt.Frame.opcode = Websocket_lwt.Frame.Opcode.Pong; final = true; content; extension = 0; }
+        | _ ->
+          (* Printf.printf "%s, %d, %b, %s\n%!" opcode_str frame.extension frame.final frame.content; *)
+          Lwt.return () ) >>= fun () ->
+      loop ()
+    | `Timeout ->
+      if now () > !last_communication +. 20.0 then
+        let%lwt () = send { Websocket_lwt.Frame.opcode = Websocket_lwt.Frame.Opcode.Close; final = true; content = ""; extension = 0; } in
+        rtms.rtm_receive RtmDisconnected
+      else
+        let ping = { id = !send_id; type_ = "ping" } in
+        let _ = incr send_id in
+        let json = rtm_ping_to_yojson ping in
+        let str = Yojson.Safe.to_string json in
+        let%lwt () = send { Websocket_lwt.Frame.opcode = Websocket_lwt.Frame.Opcode.Text; final = true; content = str; extension = 0; } in
+        loop ()
+    | `Eof ->
+      rtms.rtm_receive RtmDisconnected
+    | `Exception exn ->
+      let%lwt () = send { Websocket_lwt.Frame.opcode = Websocket_lwt.Frame.Opcode.Close; final = true; content = ""; extension = 0; } in
+      rtms.rtm_receive (RtmException exn)
+    | `Stop ->
+      let%lwt () = send { Websocket_lwt.Frame.opcode = Websocket_lwt.Frame.Opcode.Close; final = true; content = ""; extension = 0; } in
+      rtms.rtm_receive RtmDisconnected
+  in
+  loop ()
+
+let rtm_setup uri =
+  let uri = Uri.with_scheme (Uri.of_string uri) (Some "https") in
+  let ctx = Conduit_lwt_unix.default_ctx in
+  Resolver_lwt.resolve_uri ~uri Resolver_lwt_unix.system >>= fun endp ->
+  Conduit_lwt_unix.(endp_to_client ~ctx endp >>= fun client ->
+                    Websocket_lwt.with_connection ~ctx client uri) >>= fun connection ->
+  Lwt.return connection
+
+let rtm_connect uri =
+  let%lwt connection = rtm_setup uri in
+  let event_mbox = Lwt_mvar.create_empty () in
+  let stop_mbox = Lwt_mvar.create_empty () in
+  Lwt.async (fun () ->
+      let rtm_receive = Lwt_mvar.put event_mbox in
+      let rtm_stop () = Lwt_mvar.take stop_mbox in
+      let%lwt () = rtm_receive RtmConnected in
+      rtm_event_source
+        connection
+        { rtm_receive;
+          rtm_stop; }
+    );
+  let rtm_receive () = Lwt_mvar.take event_mbox in
+  let rtm_stop = Lwt_mvar.put stop_mbox in
+  Lwt.return { rtm_receive;
+               rtm_stop; }
+
+let rtm_start token =
+  endpoint "rtm.start"
+  |> definitely_add "token" token
+  |> query
+  >|= function
+  | `Json_response d ->
+    d |> rtm_start_obj_of_yojson |> translate_parsing_error
+  | #parsed_auth_error
+  | #rtm_start_error as res -> res
+  | _ -> `Unknown_error
+
+(* Receive messages indicating that the channel has stopped, or send a stop at least once to make
+   that happen *)
+let rtm_stop rtm =
+  let rec loop sent_stop =
+    match%lwt
+      Lwt.pick (List.concat [[rtm.rtm_receive () >>= fun msg -> Lwt.return (`Msg msg)];
+                             if sent_stop then [] else [rtm.rtm_stop () >>= fun () -> Lwt.return `Stop]])
+    with
+    | `Msg RtmDisconnected -> Lwt.return ()
+    | `Msg _ -> loop sent_stop
+    | `Stop -> loop true
+  in
+  loop false
+
+let rtm_receive rtm = rtm.rtm_receive ()

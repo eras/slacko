@@ -245,6 +245,10 @@ type bot_error = [
   | `User_is_bot
 ]
 
+type rtm_start_error = [
+  | `Migration_in_progress
+]
+
 (** API calls which require authentication will always return (at least) these
     error types. *)
 type parsed_auth_error = [
@@ -625,6 +629,27 @@ type team_access_log_obj = {
   paging: paging_obj;
 }
 
+(** Return value of starting a real-time messaging session *)
+type self_obj = {
+  id : string;
+  name : string;
+}
+
+type rtm_start_obj = {
+  self: self_obj;
+  team: team_obj;
+  latest_event_ts: timestamp;
+  (* channels: channel list; *)
+  groups: group list;
+  (* ims: im_obj list; *)
+  cache_ts: timestamp;
+  (* users: user list; *)
+  url: string;
+}
+
+(* Real-time messaging session *)
+type rtm_session
+
 (** Return value of a history related request. *)
 type history_result = [
   | `Success of history_obj
@@ -632,6 +657,25 @@ type history_result = [
   | channel_error
   | timestamp_error
 ]
+
+type rtm_message = {
+  channel : channel;
+  user : user;
+  text : string;
+  ts : timestamp;
+  team : string
+}
+
+type rtm_ping = {
+  id : int;
+  type_ : string [@key "type"];
+}
+
+type rtm_event =
+  | RtmConnected                        (* The connection was established. *)
+  | RtmDisconnected                     (* The connection was disconnected. No need to call rtm_stop. *)
+  | RtmMessage of rtm_message           (* A mesage was received *)
+  | RtmException of exn                 (* an exception happened while processing the connection.. get rid of this? *)
 
 (** {2 Type construction helper functions} *)
 
@@ -867,3 +911,18 @@ val users_set_active: token -> [ `Success | parsed_auth_error | bot_error ] Lwt.
 
 (** Manually sets user presence. *)
 val users_set_presence: token -> presence -> [ `Success | parsed_auth_error | presence_error ] Lwt.t
+
+(** Start a real-time messaging session. You need to call rtm_connect url after this to establish
+    the socket connection. *)
+val rtm_start: token -> [ `Success of rtm_start_obj | parsed_auth_error | rtm_start_error ] Lwt.t
+
+(** [rtm_connect uri] connects to the websocket backend and provides means to communicate *)
+val rtm_connect : string -> rtm_session Lwt.t
+
+(** [rtm_stop uri] stops an existing RTM session. RtmDisconnected will be returned from the
+    session after this. *)
+val rtm_stop : rtm_session -> unit Lwt.t
+
+(** [rtm_receive session] receives an event from an RTM session. You can use Lwt.pick to do
+    something else if that doesn't happen immediately. *)
+val rtm_receive : rtm_session -> rtm_event Lwt.t

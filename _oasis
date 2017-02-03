@@ -9,7 +9,7 @@ LicenseFile:  COPYING
 Homepage:     https://github.com/Leonidas-from-XIV/slacko
 Plugins:      META (0.4), DevFiles (0.4)
 BuildTools:   ocamlbuild
-BuildDepends: cohttp.lwt, yojson, ppx_deriving_yojson
+BuildDepends: cohttp.lwt, yojson, ppx_deriving_yojson, websocket.lwt, mtime.os
 
 Library slacko
   Path:           src
