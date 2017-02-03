@@ -24,6 +24,13 @@ module Cohttp_body = Cohttp_lwt_body
 
 type api_error = [
   | `Unhandled_error of string
+  | `Request_timeout
+  | `Invalid_arg_name
+  | `Invalid_array_arg
+  | `Invalid_charset
+  | `Invalid_form_data
+  | `Invalid_post_type
+  | `Missing_post_type
   | `Unknown_error
 ]
 
@@ -637,6 +644,12 @@ let validate json =
     | _, Some "invalid_presence" -> `Invalid_presence
     | _, Some "invalid_ts_latest" -> `Invalid_ts_latest
     | _, Some "invalid_ts_oldest" -> `Invalid_ts_oldest
+    | _, Some "invalid_arg_name" -> `Invalid_arg_name
+    | _, Some "invalid_array_arg" -> `Invalid_array_arg
+    | _, Some "invalid_charset" -> `Invalid_charset
+    | _, Some "invalid_form_data" -> `Invalid_form_data
+    | _, Some "invalid_post_type" -> `Invalid_post_type
+    | _, Some "missing_post_type" -> `Missing_post_type
     | _, Some "is_archived" -> `Is_archived
     | _, Some "last_member" -> `Last_member
     | _, Some "last_ra_channel" -> `Last_restricted_channel
@@ -656,6 +669,7 @@ let validate json =
     | _, Some "paid_only" -> `Paid_only
     | _, Some "rate_limited" -> `Rate_limited
     | _, Some "restricted_action" -> `Restricted_action
+    | _, Some "request_timeout" -> `Request_timeout
     | _, Some "too_long" -> `Too_long
     | _, Some "unknown_type" -> `Unknown_type
     | _, Some "user_does_not_own_channel" -> `User_does_not_own_channel

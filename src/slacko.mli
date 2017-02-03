@@ -40,6 +40,13 @@
 
 type api_error = [
   | `Unhandled_error of string
+  | `Request_timeout
+  | `Invalid_arg_name
+  | `Invalid_array_arg
+  | `Invalid_charset
+  | `Invalid_form_data
+  | `Invalid_post_type
+  | `Missing_post_type
   | `Unknown_error
 ]
 
