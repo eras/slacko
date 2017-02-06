@@ -722,6 +722,7 @@ val group_of_string: string -> group
     simple user name in which case every API call will look up the user name
     to an id in an additional request. *)
 val user_of_string: string -> user
+val string_of_user: user -> string
 
 (** Constructs a channel out of a given string. Can either be a channel id
     starting with a capital 'C' which is the preferred way or a channel name

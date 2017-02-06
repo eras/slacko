@@ -939,6 +939,10 @@ let channel_of_string s =
 let user_of_string s =
   if s.[0] = 'U' then UserId s else UserName s
 
+let string_of_user = function
+  | UserId s -> s
+  | UserName s -> s
+
 let group_of_string s =
   if s.[0] = 'G' then GroupId s else GroupName s
 
